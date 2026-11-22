@@ -292,6 +292,80 @@ company of ~100 staff. Writes are batched per request (one row), monthly
 partitions keep indexes small, and the admin audit view queries by
 partition.
 
+## 9. Online forms: job application, onboarding, internship
+
+Three public-facing forms sharing one identity-verified candidate profile:
+**job application**, **new-hire onboarding** (after offer accepted) and
+**internship** (application + onboarding in one).
+
+### Identity: EarthID with MyDigital ID (mandatory)
+- The form is reachable only after signing in with **EarthID as an OIDC
+  provider** (authorization code + PKCE; EarthID Flow 3) — a second provider
+  beside Google in `oauth2_service`.
+- Scopes: `openid profile email nric mydigital.verification individual_profile`.
+- Accepted only when the ID token / userinfo carries
+  `mydigital_verified === true` **and** a 12-digit `ic_no`. Otherwise the
+  candidate is told to verify with MyDigital ID in EarthID first.
+- Prefilled and locked from verified claims: name, NRIC (+ derived date of
+  birth and gender from the IC). Prefilled but editable: email, phone,
+  `mailingAddress`, `placeAddress`, `kodLokasi`.
+- Candidates are a separate principal (`candidates`, keyed by EarthID `sub`
+  and NRIC blind index), not users of the HR app; one candidate can apply to
+  several openings without re-entering data.
+- EarthID admin needs an OIDC client for the HR app with those scopes and
+  `individual_profile` approval.
+
+### Selfie
+- Live camera capture in the browser only (`getUserMedia`); gallery upload
+  disabled. Simple liveness prompt (e.g. turn head / blink, two frames) to
+  deter a photo of a photo.
+- Optional second shot holding the MyKad.
+- Stored encrypted; HR compares visually. Automated face matching against an
+  IC photo is out of scope (MyDigital ID returns no photo; would need a
+  licensed eKYC vendor).
+- Biometric data → explicit consent checkbox with purpose, per PDPA 2010
+  (as amended 2024).
+
+### Fields
+| Group | Fields |
+| --- | --- |
+| Identity | name, NRIC (verified), DOB, gender, nationality, selfie |
+| Contact | email, mobile phone |
+| Home address | line 1–3, postcode, city, state, **kod lokasi** (from EarthID claim; format-validated, e.g. `KLTA.A1`; lookup via Kodlokasi API if its docs are provided) |
+| Emergency contacts | 1–3: name, relationship, phone, address |
+| Health | allergies, medical conditions, current medication (optional), blood type (optional) |
+| Academic | institution, qualification level, field, year, CGPA, certificate upload |
+| Professional certs | name, issuer, number, issue/expiry date, upload |
+| Past employment | employer, position, from/to, last salary (optional), reason for leaving, release/service letter upload |
+| Internship only | university, programme, internship start/end, university supervisor + contact, placement letter upload |
+| Onboarding only | bank account, EPF/SOCSO/tax numbers, spouse/children (for PCB reliefs), signed offer letter, NDA (signing per section 1) |
+
+### Health data handling
+- Sensitive personal data (PDPA s.40): explicit consent, encrypted, and a
+  separate `ViewMedical` permission (e.g. HR manager / first-aider) —
+  `ViewCompensation` does not grant it.
+- Recommendation: collect allergies and medical conditions at **onboarding**
+  (after offer), not on the job application, to avoid the appearance of
+  screening candidates on health grounds. Internship form asks them at the
+  acceptance step.
+
+### Pipeline
+applied → screening → interview → offer → accepted → onboarding → hired
+(or rejected / withdrawn). On **hired**, the candidate profile, verified NRIC,
+address, emergency contacts, health data and documents are copied into the
+employee record (encrypted), and the selfie becomes the staff photo.
+
+### Retention and erasure
+- Unsuccessful applicants: data kept 12 months (configurable) unless the
+  candidate consents to the talent pool, then erased.
+- Erasure is **crypto-shredding**: each candidate's details are encrypted
+  under a per-candidate key; destroying the key makes the data unreadable while
+  the immutable audit chain (section 8) stays intact and verifiable.
+
+### Abuse controls
+Turnstile on the public pages, per-sub rate limits, upload type/size limits,
+malware scan of uploads, one active application per opening per candidate.
+
 ## Build order
 0. Encryption foundation: key hierarchy, custodian unseal, field crypto,
    blind index, encrypted uploads, `ViewCompensation` redaction, and the
@@ -302,4 +376,6 @@ partition.
 4. Commission
 5. Grab for Business import, project cost report
 6. Leave fixes, profile self-edit (encrypted PII), hide payroll menu
+6a. Online forms: EarthID OIDC login, candidate profile, job application,
+    internship, onboarding, selfie, pipeline, hire → employee
 7. Phase B: encrypt existing payroll data
