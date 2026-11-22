@@ -1,4 +1,4 @@
-# Internal HR modules — Design
+# EarthBusiness Suite — Internal HR modules design
 
 Date: 2026-11-22
 Status: Draft (agreed scope incl. P&C role, encryption and immutable audit, awaiting build go-ahead)
@@ -366,7 +366,84 @@ employee record (encrypted), and the selfie becomes the staff photo.
 Turnstile on the public pages, per-sub rate limits, upload type/size limits,
 malware scan of uploads, one active application per opening per candidate.
 
+## 10. Product, UX and PWA
+
+### Name and brand
+- Product name: **EarthBusiness Suite** (replaces "PayrollMY": `index.html`
+  title, `BrandLogo` assets under `public/branding/`, emails, PDFs, i18n
+  strings, manifest). Module names inside the suite: People, Leave,
+  Attendance, Claims, Projects, Documents, Recruitment, Payroll (hidden).
+- New logo/lockup and colour tokens to be supplied by the company or
+  proposed in a design pass; the app reads them from one token file.
+
+### Platform
+- One React codebase, **mobile-first responsive**, installable as a **PWA**
+  (Android, iOS 16.4+, desktop Chrome/Edge) and used normally in any browser.
+- `vite-plugin-pwa`: web app manifest (name, icons, maskable icon, theme
+  colour, `display: standalone`, shortcuts: Clock in, Apply leave, New claim,
+  To sign), service worker for the app shell and static assets.
+- **No API responses are cached by the service worker**, and nothing
+  sensitive goes to IndexedDB/localStorage — consistent with sections 7–8
+  (encrypted at rest, every read audited). Offline: the shell opens and shows
+  an offline state; drafts of forms (claim, leave, application) are kept
+  locally *without* attachments or health/PII fields and submitted when back
+  online.
+- Clock-in is never queued offline: it depends on the server-observed network,
+  geofence and QR TTL.
+- **Web Push** notifications: approvals waiting, document to sign, leave /
+  claim decision, outstation approved, system sealed (custodians).
+- Device capabilities used: camera (QR scan, selfie, receipt photo),
+  geolocation (geofence), WebAuthn / passkeys (Face ID / fingerprint login
+  and check-in), share target for receipts (Android).
+
+### Navigation
+- **Mobile:** bottom tab bar — Home, Attendance, Requests (leave / claims /
+  outstation), Inbox (approvals, to sign, notifications), Me. A primary
+  floating action for the most common task of the role (Clock in for staff,
+  Approve for managers).
+- **Desktop/tablet:** collapsible left sidebar grouped by module, top bar
+  with company switcher, global search (audited, permission-filtered),
+  notifications and profile.
+- Role-based home: staff see today's clock-in, leave balance, pending
+  items; managers see approvals and team presence; P&C sees compensation
+  tasks; admins see system health (sealed state, audit verification).
+
+### Design system
+- Design tokens (colour, type scale, spacing, radius, elevation, motion) in
+  one place; light and dark themes; Tailwind v4 theme variables.
+- Component library built on accessible primitives: Button, Input, Select,
+  Combobox, DatePicker (local MYT), FileUpload with camera, Sheet/BottomSheet
+  (mobile), Dialog, ConfirmDialog (replaces `window.confirm`/`alert`), Toast,
+  Tabs, Badge/StatusPill, EmptyState, Skeleton, Stepper (multi-step forms),
+  DataTable that becomes a card list under `md` breakpoint, keyboard-operable
+  rows.
+- Money fields render as redacted chips when the viewer lacks
+  `ViewCompensation`; medical fields likewise with `ViewMedical`.
+- Accessibility: WCAG 2.2 AA — labels on every control (plan #67), 44 px
+  touch targets, focus rings, reduced-motion support, colour contrast checked
+  in CI.
+- Languages: the existing four-locale i18n (BM, EN, 中文, தமிழ்) covers all new
+  screens.
+
+### UX principles
+- One primary action per screen; forms split into short steps with progress
+  and autosave of non-sensitive drafts.
+- Status always visible (pill + timeline) for every request.
+- Explain blocks in plain language (e.g. "System is locked — waiting for a key
+  custodian", "Outside office network — your check-in is flagged for HR").
+- Fast: route-level code splitting, skeletons, optimistic UI only for
+  non-financial actions; target LCP < 2.5 s on mid-range Android over 4G.
+
+### Validation before build
+Clickable prototype of the key flows (staff mobile: clock in, apply leave,
+claim with Grab receipt, sign NDA; manager: approvals; candidate: EarthID
+sign-in → application form with selfie; admin desktop: projects, commission,
+audit) reviewed with real users before implementation of each module's UI.
+
 ## Build order
+- UX: design system, rebrand to EarthBusiness Suite and PWA shell run
+  alongside step 0; each module ships its mobile and desktop UI together.
+
 0. Encryption foundation: key hierarchy, custodian unseal, field crypto,
    blind index, encrypted uploads, `ViewCompensation` redaction, and the
    immutable `audit_events` trail (request layer, hash chain, checkpoints)
