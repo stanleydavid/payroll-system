@@ -1,7 +1,7 @@
 # Internal HR modules — Design
 
 Date: 2026-11-22
-Status: Draft (agreed scope incl. P&C role and encryption, awaiting build go-ahead)
+Status: Draft (agreed scope incl. P&C role, encryption and immutable audit, awaiting build go-ahead)
 
 Scope for the company's own internal HR use. Payroll stays in the codebase
 but is hidden from the menu until verified statutory rule sets exist (see
@@ -213,9 +213,89 @@ codes, login email (so sign-in and the sealed-state message still work).
   details, entries) converted, with reports/EA form/dashboard rewritten to
   aggregate in Rust.
 
+## 8. Full, immutable audit trail
+
+Requirement: every **read, print/download, search, export, create, edit and
+delete** is audited, and audit records cannot be altered or removed.
+
+### Current state (gaps)
+- `audit_logs` covers selected mutations and credential events (~125 call
+  sites); reads, searches and prints are not recorded.
+- Rows are mutable: `company_id` is `ON DELETE CASCADE` and `user_id` is
+  `ON DELETE SET NULL` (`1008`), so deleting a company or user rewrites or
+  erases history. No tamper evidence.
+- `old_values` / `new_values` are plaintext `jsonb` — they would leak every
+  field section 7 encrypts.
+- Plan item #26 (retention purge of `audit_logs`) is superseded by this
+  section for audit data.
+
+### Capture
+1. **Request layer (every authenticated API call).** An Axum middleware
+   writes one event per request: actor (user, roles, effective permissions
+   hash), company, method, route *template*, action class (`read` |
+   `search` | `export` | `print` | `create` | `update` | `delete` |
+   `auth`), entity type + ids touched, result count, HTTP status, client IP,
+   user agent, session id, request id, duration. Search terms and filters
+   are captured encrypted (they may contain IC numbers or names).
+2. **Domain events (mutations).** Services write a field-level diff (old →
+   new) for every create/update/delete **in the same transaction** as the
+   change, encrypted with the company DEK. A mutation whose audit write fails
+   rolls back.
+3. **Reads fail closed.** If the request-level event cannot be written, the
+   response is withheld (503) rather than served unaudited.
+4. **Print / download.** Every PDF, CSV, Excel, payslip, EA form, signed
+   document and file download is server-generated and logged as `print` /
+   `export` with the document id and its SHA-256. The app's Print buttons go
+   through the server. A browser Ctrl+P on an on-screen page is logged on a
+   best-effort basis (`beforeprint` beacon); screenshots and photos of the
+   screen cannot be detected by any web app.
+5. **Background jobs and the unseal ceremony** are actors too (`system`,
+   `custodian`).
+
+### Immutability
+- New `audit_events` table, partitioned by month. **No foreign keys** to
+  users/companies (actor and company are stored by value), so deleting a user
+  or company never touches audit rows. Existing `audit_logs` rows are copied
+  in once and the table frozen.
+- Database: the API role gets `INSERT` + `SELECT` only; `UPDATE`, `DELETE`
+  and `TRUNCATE` revoked and additionally rejected by triggers. Company
+  teardown no longer removes audit data.
+- **Tamper evidence:** each event carries `seq`, `prev_hash` and `hash` =
+  SHA-256 over its canonical bytes + `prev_hash` (hash chain per company).
+  Every hour a **checkpoint** (company, last seq, chain head) is signed with an
+  Ed25519 key unwrapped at unseal and shipped **off-host** to write-once
+  storage (object lock) plus a daily digest email to the custodians.
+- **Verification:** a daily job and an admin "Verify audit trail" action
+  recompute the chain against the latest off-host checkpoint and alert on any
+  gap, edit or deletion.
+- Honest limit: a Postgres superuser can bypass grants and triggers. They
+  cannot do so *undetectably*: a changed or deleted row breaks the chain
+  against checkpoints already stored off-host.
+
+### Encryption and access
+- Event metadata (time, actor, action, entity type, route) is plaintext so it
+  can be filtered; details (diffs, search terms, result ids lists) are
+  encrypted per section 7.
+- Viewing the audit trail needs `ViewAuditLog`; seeing compensation fields
+  inside diffs also needs `ViewCompensation`. Reading the audit trail is
+  itself audited.
+
+### Retention
+7 years (aligned with record-keeping under the Income Tax Act 1967 and the
+Employment Act). Partitions older than that are exported to the off-host
+write-once store with their checkpoints before detaching; nothing inside the
+retention window can be deleted.
+
+### Volume
+Every read is an event: expect tens of thousands of rows per day for a
+company of ~100 staff. Writes are batched per request (one row), monthly
+partitions keep indexes small, and the admin audit view queries by
+partition.
+
 ## Build order
 0. Encryption foundation: key hierarchy, custodian unseal, field crypto,
-   blind index, encrypted uploads, `ViewCompensation` redaction
+   blind index, encrypted uploads, `ViewCompensation` redaction, and the
+   immutable `audit_events` trail (request layer, hash chain, checkpoints)
 1. Policy/NDA/memo signing (click + MyDigital ID)
 2. Projects + tasks + import
 3. Outstation + claims project/trip link + Grab claim type
