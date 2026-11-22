@@ -1,7 +1,7 @@
 # Internal HR modules — Design
 
 Date: 2026-11-22
-Status: Draft (agreed scope, awaiting build go-ahead)
+Status: Draft (agreed scope incl. P&C role and encryption, awaiting build go-ahead)
 
 Scope for the company's own internal HR use. Payroll stays in the codebase
 but is hidden from the menu until verified statutory rule sets exist (see
@@ -132,16 +132,94 @@ a project close.
 ## Reports
 Project cost: claims + Grab + per-diem + commission, by project/month, Excel export.
 
-## Permissions
-New permissions following the allow-list model: `ManagePolicies`,
-`ManageProjects`, `ApproveCommission`, `ImportGrab`. PM approval is scoped to
-projects where the approver is `manager_id`. `exec` sees projects but not
-commission amounts.
+## 6. Permissions and the P&C compensation role
+
+New allow-list permissions: `ManagePolicies`, `ManageProjects`,
+`ApproveCommission`, `ImportGrab`, and **`ViewCompensation`**.
+
+- `ViewCompensation` gates every money figure about a person: basic salary,
+  allowances, bonus, incentive (insentif), commission rules/rates, commission
+  lines and totals, payslip amounts. Granted via a user group (e.g. "P&C").
+- Enforcement is server-side: responses for callers without it carry no
+  amount fields (`null` + `redacted: true`), not values hidden by the UI.
+  Exports follow the same rule.
+- PM approval is scoped to projects where the approver is `manager_id`; a PM
+  without `ViewCompensation` approves the *work* (task done, project closed),
+  not the amounts. Approving commission amounts needs `ApproveCommission` +
+  `ViewCompensation`.
+- `exec` keeps its existing denial; separation-of-duties invariants in
+  `permission.rs` extended to the effective (role + group) set (plan #37).
+- Every read/export of compensation data writes an audit row.
+
+## 7. Application-level encryption at rest
+
+Goal: a person with Postgres access, a dump or a backup cannot read personal
+or compensation data. Decryption happens only in the API process's memory.
+
+### Key hierarchy
+- **Master key (KEK)** — never stored on the server. Derived at unlock time
+  from a key-custodian passphrase (Argon2id) or recovery key; held only in
+  process memory (`zeroize` on drop; `PR_SET_DUMPABLE=0`, no core dumps).
+- **Per-company data keys (DEK)** — random 256-bit, stored in
+  `encryption_keys` only wrapped by the KEK (AES-256-GCM), versioned for
+  rotation.
+- **Blind-index key** — per company, wrapped likewise; HMAC-SHA256 of
+  normalised values for exact-match lookup (IC number, bank account).
+
+### Custodian unlock (chosen)
+- On boot the API starts **sealed**: login, health, attendance clock-in and
+  other plaintext paths work; any route needing decryption returns 503
+  `system_sealed`.
+- `POST /api/admin/unseal` — super_admin session + custodian passphrase,
+  strict rate limit, audited (who/when, never the secret). Successful unseal
+  unwraps DEKs into memory.
+- At least two custodians, each with their own wrapping of the KEK, plus a
+  printed recovery key kept offline — losing every custodian secret loses the
+  data, by design.
+- On seal-at-boot, custodians are notified (email) so a deploy or crash
+  doesn't leave the system sealed unnoticed.
+- Residual risk, documented in the admin UI: someone with root on the running
+  host can still read process memory. This design protects against DB-only
+  access, dumps and backups, and against a sysadmin who lacks a custodian
+  secret and does not tamper with the live host.
+
+### Field encryption
+- `core/field_crypto.rs`: AES-256-GCM, value stored as
+  `version || nonce || ciphertext` (`bytea`). AAD = table, column and row id,
+  so ciphertext cannot be moved to another row or column.
+- Typed wrappers (`Encrypted<String>`, `Encrypted<Decimal>`, `Encrypted<i64>`)
+  so repositories return ciphertext and services decrypt explicitly; the
+  plaintext type never derives `Serialize` without the permission check.
+- Money held encrypted is aggregated in Rust after decryption; SQL `SUM`
+  over encrypted columns is not possible.
+- Uploaded files (NDAs, signed PDFs, receipts, IC copies) encrypted on disk
+  with the company DEK; served through the existing authorized upload route.
+
+### What is encrypted
+IC/passport, address, phone, personal email, bank account, emergency
+contacts, date of birth; basic salary, allowances, bonus, incentive,
+commission rules and lines; signature evidence (EarthID token, IP); claim
+descriptions and receipts; Grab ride details.
+
+### What stays plaintext (needed for joins, filters, indexes)
+Ids, `company_id`, foreign keys, dates/timestamps, statuses, project/task
+codes, login email (so sign-in and the sealed-state message still work).
+
+### Rollout (chosen)
+- Phase A: encryption foundation + unseal; all new modules and staff PII
+  built encrypted from day one; one-shot migration encrypting existing PII
+  columns (new migration, run after unseal).
+- Phase B: existing payroll tables (`employees.basic_salary`, payroll items,
+  details, entries) converted, with reports/EA form/dashboard rewritten to
+  aggregate in Rust.
 
 ## Build order
+0. Encryption foundation: key hierarchy, custodian unseal, field crypto,
+   blind index, encrypted uploads, `ViewCompensation` redaction
 1. Policy/NDA/memo signing (click + MyDigital ID)
 2. Projects + tasks + import
 3. Outstation + claims project/trip link + Grab claim type
 4. Commission
 5. Grab for Business import, project cost report
-6. Leave fixes, profile self-edit, hide payroll menu
+6. Leave fixes, profile self-edit (encrypted PII), hide payroll menu
+7. Phase B: encrypt existing payroll data
